@@ -8,6 +8,7 @@ on:
 jobs:
   deploy:
     runs-on: self-hosted
+    if: "!startsWith(github.event.head_commit.message, 'docs:')"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
