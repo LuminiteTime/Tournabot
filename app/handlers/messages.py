@@ -15,6 +15,20 @@ from app.tournament import TournamentService
 
 router = Router()
 
+PLAYERS_INPUT_PROMPT = (
+    "📝 Введите список игроков через запятую.\n"
+    "Указывайте имена в порядке убывания рейтинга: бот автоматически расставит игроков змейкой по таблицам.\n\n"
+    "Например, если таблиц 3 и игроки: A, B, C, D, E, F, ...\n"
+    "Тогда распределение будет таким:\n"
+    "Таблица 1, строка 1: A\n"
+    "Таблица 2, строка 1: B\n"
+    "Таблица 3, строка 1: C\n"
+    "Таблица 3, строка 2: D\n"
+    "Таблица 2, строка 2: E\n"
+    "Таблица 1, строка 2: F\n"
+    "и т.д."
+)
+
 
 @router.message()
 async def handle_text(message: Message) -> None:
@@ -61,8 +75,7 @@ async def _handle_naming(msg: Message, t, svc: TournamentService) -> None:
     _delete_user_msg(msg)
 
     await msg.bot.edit_message_text(
-        f"🏓 <b>Турнир: {_esc(name)}</b>\n\n"
-        "📝 Введите список игроков через запятую:",
+        f"🏓 <b>Турнир: {_esc(name)}</b>\n\n{PLAYERS_INPUT_PROMPT}",
         chat_id=msg.chat.id,
         message_id=t.message_id,
         reply_markup=cancel_kb(),
@@ -83,8 +96,7 @@ async def _handle_players(msg: Message, t, svc: TournamentService) -> None:
     if len(players) < 4:
         await msg.bot.edit_message_text(
             f"🏓 <b>Турнир: {_esc(name)}</b>\n\n"
-            "⚠️ Минимум 4 игрока!\n"
-            "📝 Введите список игроков через запятую:",
+            f"⚠️ Минимум 4 игрока!\n{PLAYERS_INPUT_PROMPT}",
             chat_id=msg.chat.id,
             message_id=t.message_id,
             reply_markup=cancel_kb(),
@@ -95,8 +107,7 @@ async def _handle_players(msg: Message, t, svc: TournamentService) -> None:
     if len(players) > 12:
         await msg.bot.edit_message_text(
             f"🏓 <b>Турнир: {_esc(name)}</b>\n\n"
-            "⚠️ Максимум 12 игроков!\n"
-            "📝 Введите список игроков через запятую:",
+            f"⚠️ Максимум 12 игроков!\n{PLAYERS_INPUT_PROMPT}",
             chat_id=msg.chat.id,
             message_id=t.message_id,
             reply_markup=cancel_kb(),
