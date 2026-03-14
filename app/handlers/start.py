@@ -4,6 +4,8 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from app.bug_reports import BugReportService
+from app.config import settings
 from app.db import async_session
 from app.keyboards import menu_kb
 from app.tournament import TournamentService
@@ -21,10 +23,15 @@ async def cmd_start(message: Message) -> None:
         # Сброс состояния
         t.data = {"status": "menu"}
 
+        is_admin = message.from_user is not None and message.from_user.id == settings.ADMIN_USER_ID
+        open_bug_count = None
+        if is_admin:
+            open_bug_count = await BugReportService(session).count_open()
+
         sent = await message.answer(
             "🏓 <b>TournaBot — Турниры по настольному теннису</b>\n\n"
             "Нажмите кнопку, чтобы начать новый турнир.",
-            reply_markup=menu_kb(),
+            reply_markup=menu_kb(is_admin=is_admin, open_bug_count=open_bug_count),
             parse_mode="HTML",
         )
         t.message_id = sent.message_id

@@ -5,10 +5,12 @@ from __future__ import annotations
 from aiogram import Router
 from aiogram.types import Message
 
+from app.bug_reports import BugReportService
+from app.config import settings
 from app.combinations import get_combinations
 from app.db import async_session
 from app.handlers.helpers import finish_tournament, show_table, _esc
-from app.keyboards import cancel_kb, combinations_kb, table_grid_kb
+from app.keyboards import cancel_kb, combinations_kb, menu_kb, table_grid_kb
 from app.tournament import TournamentService
 
 router = Router()
@@ -39,6 +41,8 @@ async def handle_text(message: Message) -> None:
             await _handle_score(message, t, svc)
         elif status == "playing" and data.get("awaiting_finish_confirm"):
             await _handle_finish_confirm(message, t, svc)
+        elif status == "bug_reporting":
+            await _handle_bug_report(message, t, svc, session)
 
 
 # ── Ввод названия турнира ──────────────────────────────────────────────
@@ -209,6 +213,53 @@ async def _handle_finish_confirm(msg: Message, t, svc: TournamentService) -> Non
         await svc.save(t)
         current = data.get("current_table", 0)
         await show_table(msg.bot, msg.chat.id, t.message_id, data, current)
+
+
+# ── Баг-репорт ─────────────────────────────────────────────────────────
+
+async def _handle_bug_report(msg: Message, t, svc: TournamentService, session) -> None:
+    text = msg.text.strip()
+    if not text:
+        return
+
+    _delete_user_msg(msg)
+
+    # Сохраняем репорт
+    from_user = msg.from_user
+    reporter_user_id = from_user.id if from_user else msg.chat.id
+    reporter_alias: str | None = None
+    if from_user:
+        if from_user.username:
+            reporter_alias = f"@{from_user.username}"
+        else:
+            full_name = " ".join([p for p in [from_user.first_name, from_user.last_name] if p])
+            reporter_alias = full_name or None
+    await BugReportService(session).create(
+        reporter_chat_id=msg.chat.id,
+        reporter_user_id=reporter_user_id,
+        reporter_alias=reporter_alias,
+        text=text,
+    )
+
+    # Возвращаемся в меню
+    t.data = {"status": "menu"}
+    await svc.save(t)
+
+    is_admin = reporter_user_id == settings.ADMIN_USER_ID
+    open_bug_count = None
+    if is_admin:
+        open_bug_count = await BugReportService(session).count_open()
+
+    await msg.bot.edit_message_text(
+        "✅ <b>Спасибо!</b>\n\n"
+        "Баг-репорт сохранён и будет просмотрен автором.\n\n"
+        "🏓 <b>TournaBot — Турниры по настольному теннису</b>\n\n"
+        "Нажмите кнопку, чтобы начать новый турнир.",
+        chat_id=msg.chat.id,
+        message_id=t.message_id,
+        reply_markup=menu_kb(is_admin=is_admin, open_bug_count=open_bug_count),
+        parse_mode="HTML",
+    )
 
 
 # ── Вспомогательные ────────────────────────────────────────────────────

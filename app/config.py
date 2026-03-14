@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     """Настройки бота и БД — читаются из .env или окружения."""
 
     BOT_TOKEN: str
+    # Telegram user id автора/админа (для меню баг-репортов)
+    ADMIN_USER_ID: int
     POSTGRES_USER: str
     POSTGRES_PASSWORD: str
     POSTGRES_DB: str

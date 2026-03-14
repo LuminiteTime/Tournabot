@@ -11,6 +11,7 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.tournament import TournamentService
+from app.models import BugReport
 
 # ── Стили кнопок ────────────────────────────────────────────────────────
 STYLE_AVAILABLE = "success"  # зелёный — матч можно начать сейчас
@@ -36,17 +37,47 @@ def _trunc(name: str) -> str:
 
 # ── Клавиатуры меню ─────────────────────────────────────────────────────
 
-def menu_kb() -> InlineKeyboardMarkup:
-    """Главное меню — «Начать турнир»."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[_btn("Начать турнир", "start")]]
-    )
+def menu_kb(*, is_admin: bool = False, open_bug_count: int | None = None) -> InlineKeyboardMarkup:
+    """Главное меню."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [_btn("Начать турнир", "start")],
+        [_btn("🐞 Сообщить о баге", "bug:new")],
+    ]
+    if is_admin:
+        suffix = f" ({open_bug_count})" if open_bug_count is not None else ""
+        rows.append([_btn(f"🐞 Баг-репорты{suffix}", "bugs:list")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def cancel_kb() -> InlineKeyboardMarkup:
     """Кнопка отмены (на этапе ввода текста)."""
     return InlineKeyboardMarkup(
         inline_keyboard=[[_btn("Отмена", "cancel")]]
+    )
+
+
+def bug_reports_list_kb(reports: list[BugReport]) -> InlineKeyboardMarkup:
+    """Список открытых баг-репортов для админа."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for r in reports:
+        # На кнопке только краткая информация (без username/alias)
+        created = r.created_at.strftime("%Y-%m-%d")
+        preview = (r.text or "").strip().replace("\n", " ")
+        if len(preview) > 24:
+            preview = preview[:24] + "…"
+        rows.append([_btn(f"#{r.id} {created} {preview}", f"bugs:view:{r.id}")])
+    rows.append([_btn("⬅️ Назад", "cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def bug_report_view_kb(report_id: int) -> InlineKeyboardMarkup:
+    """Просмотр баг-репорта + закрытие."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn("✅ Закрыть", f"bugs:done:{report_id}")],
+            [_btn("⬅️ К списку", "bugs:list")],
+            [_btn("⬅️ В меню", "cancel")],
+        ]
     )
 
 

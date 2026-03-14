@@ -52,6 +52,7 @@ cp .env.example .env
 
 ```dotenv
 BOT_TOKEN=your-telegram-bot-token-here
+ADMIN_USER_ID=123456789
 POSTGRES_USER=tournabot
 POSTGRES_PASSWORD=strongpassword
 POSTGRES_DB=tournabot
@@ -85,6 +86,7 @@ docker compose down
 | Secret | Описание |
 |---|---|
 | `BOT_TOKEN` | Токен Telegram-бота |
+| `ADMIN_USER_ID` | Telegram user id автора/админа |
 | `POSTGRES_USER` | Имя пользователя PostgreSQL |
 | `POSTGRES_PASSWORD` | Пароль PostgreSQL |
 | `POSTGRES_DB` | Имя базы данных |

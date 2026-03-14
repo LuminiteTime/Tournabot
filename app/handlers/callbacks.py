@@ -5,6 +5,8 @@ from __future__ import annotations
 from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
+from app.bug_reports import BugReportService
+from app.config import settings
 from app.db import async_session
 from app.handlers.helpers import (
     _apply_tie_overrides_to_rankings,
@@ -60,13 +62,136 @@ async def cancel(cb: CallbackQuery) -> None:
         t.data = {"status": "menu"}
         await svc.save(t)
 
+        is_admin = cb.from_user is not None and cb.from_user.id == settings.ADMIN_USER_ID
+        open_bug_count = None
+        if is_admin:
+            open_bug_count = await BugReportService(session).count_open()
+
     await cb.message.edit_text(
         "🏓 <b>TournaBot — Турниры по настольному теннису</b>\n\n"
         "Нажмите кнопку, чтобы начать новый турнир.",
-        reply_markup=menu_kb(),
+        reply_markup=menu_kb(is_admin=is_admin, open_bug_count=open_bug_count),
         parse_mode="HTML",
     )
     await cb.answer()
+
+
+# ── Баг-репорты: пользователь ──────────────────────────────────────────
+
+
+@router.callback_query(F.data == "bug:new")
+async def bug_new(cb: CallbackQuery) -> None:
+    async with async_session() as session:
+        svc = TournamentService(session)
+        t = await svc.get(cb.message.chat.id)
+        if not t:
+            await cb.answer("Используйте /start")
+            return
+        data = t.data or {}
+        data["status"] = "bug_reporting"
+        t.data = data
+        await svc.save(t)
+
+    await cb.message.edit_text(
+        "🐞 <b>Опишите найденный баг:</b>\n\n"
+        "Один сообщением, как можно подробнее. "
+        "Чтобы отменить, нажмите «Отмена».",
+        reply_markup=cancel_kb(),
+        parse_mode="HTML",
+    )
+    await cb.answer()
+
+
+# ── Баг-репорты: админ ────────────────────────────────────────────────
+
+
+def _is_admin(user_id: int | None) -> bool:
+    return user_id == settings.ADMIN_USER_ID
+
+
+@router.callback_query(F.data == "bugs:list")
+async def bugs_list(cb: CallbackQuery) -> None:
+    if not _is_admin(cb.from_user.id if cb.from_user else None):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+
+    from app.keyboards import bug_reports_list_kb
+
+    async with async_session() as session:
+        reports = await BugReportService(session).list_open(limit=20)
+
+    if reports:
+        text = (
+            f"🐞 <b>Открытые баг-репорты:</b>\n\n"
+            f"Всего показано: <b>{len(reports)}</b>\n"
+            "Нажмите на репорт, чтобы открыть."
+        )
+    else:
+        text = "🐞 <b>Открытые баг-репорты:</b>\n\nПока нет новых репортов."
+
+    await cb.message.edit_text(
+        text,
+        reply_markup=bug_reports_list_kb(reports),
+        parse_mode="HTML",
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("bugs:view:"))
+async def bugs_view(cb: CallbackQuery) -> None:
+    if not _is_admin(cb.from_user.id if cb.from_user else None):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+
+    report_id = int(cb.data.split(":")[2])
+
+    from app.keyboards import bug_report_view_kb
+
+    async with async_session() as session:
+        r = await BugReportService(session).get(report_id)
+
+    if not r:
+        await cb.answer("Репорт не найден", show_alert=True)
+        return
+
+    created = r.created_at.strftime("%Y-%m-%d %H:%M")
+    text = r.text or ""
+    # Telegram limit ~4096; держим с запасом
+    if len(text) > 3200:
+        text = text[:3200] + "\n\n[текст обрезан]"
+    sender = r.reporter_alias or "без username"
+    body = (
+        f"🐞 <b>Баг-репорт #{r.id}</b>\n\n"
+        f"Дата: <b>{created}</b>\n"
+        f"От: <b>{_esc(sender)}</b>\n\n"
+        f"{_esc(text)}"
+    )
+
+    await cb.message.edit_text(
+        body,
+        reply_markup=bug_report_view_kb(r.id),
+        parse_mode="HTML",
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("bugs:done:"))
+async def bugs_done(cb: CallbackQuery) -> None:
+    if not _is_admin(cb.from_user.id if cb.from_user else None):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+
+    report_id = int(cb.data.split(":")[2])
+
+    async with async_session() as session:
+        ok = await BugReportService(session).mark_done(report_id)
+
+    if not ok:
+        await cb.answer("Репорт не найден", show_alert=True)
+        return
+
+    # Возвращаемся к списку
+    await bugs_list(cb)
 
 
 # ── Выбор комбинации таблиц ────────────────────────────────────────────
