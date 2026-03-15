@@ -1,33 +1,20 @@
-"""Построение инлайн-клавиатур для всех экранов бота.
-
-Стили кнопок (Bot API 9.4):
-  "success" — зелёный (доступные для игры матчи)
-  "primary" — синий  (текущий играющийся матч)
-  "danger"  — красный
-"""
+"""Построение инлайн-клавиатур для всех экранов бота."""
 
 from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.tournament import TournamentService
 from app.models import BugReport
-
-# ── Стили кнопок ────────────────────────────────────────────────────────
-STYLE_AVAILABLE = "success"  # зелёный — матч можно начать сейчас
-STYLE_PLAYING = "primary"    # синий — матч идёт (ближайший к жёлтому)
+from app.tournament import TournamentService
 
 MAX_NAME_LEN = 9  # максимальная длина имени на кнопке
 
 
 # ── Утилиты ─────────────────────────────────────────────────────────────
 
-def _btn(text: str, cb: str = "nop", style: str | None = None) -> InlineKeyboardButton:
-    """Создать кнопку с опциональным стилем."""
-    kw: dict = {"text": text, "callback_data": cb}
-    if style:
-        kw["style"] = style
-    return InlineKeyboardButton(**kw)
+def _btn(text: str, cb: str = "nop") -> InlineKeyboardButton:
+    """Создать кнопку."""
+    return InlineKeyboardButton(text=text, callback_data=cb)
 
 
 def _trunc(name: str) -> str:
@@ -110,15 +97,6 @@ def _match_text(match: dict, is_row_first: bool) -> str:
         return f"{s2}:{s1}"
 
 
-def _match_style(match: dict, key: str, avail: set[str]) -> str | None:
-    """Определить стиль кнопки матча."""
-    if match["status"] == "playing":
-        return STYLE_PLAYING
-    if match["status"] == "pending" and key in avail:
-        return STYLE_AVAILABLE
-    return None
-
-
 def table_grid_kb(data: dict, table_idx: int) -> InlineKeyboardMarkup:
     """
     Построить инлайн-клавиатуру — таблицу матчей для указанной таблицы.
@@ -158,8 +136,11 @@ def table_grid_kb(data: dict, table_idx: int) -> InlineKeyboardMarkup:
                 key = f"{i}_{j}"
                 m = matches[key]
                 text = _match_text(m, is_row_first=True)
-                style = _match_style(m, key, avail)
-                row.append(_btn(text, f"m:{table_idx}:{i}:{j}", style))
+                if m["status"] == "playing":
+                    text = f"🟡{text}"
+                elif m["status"] == "pending" and key in avail:
+                    text = f"🟢"
+                row.append(_btn(text, f"m:{table_idx}:{i}:{j}"))
             else:
                 # Нижний левый треугольник — зеркало (без стиля и без клика)
                 key = f"{j}_{i}"
@@ -182,6 +163,15 @@ def table_grid_kb(data: dict, table_idx: int) -> InlineKeyboardMarkup:
     rows.append([_btn("Завершить турнир", "finish")])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def finish_confirm_kb() -> InlineKeyboardMarkup:
+    """Инлайн-подтверждение принудительного завершения турнира."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn("✅ Да", "finish:confirm:yes"), _btn("↩️ Нет", "finish:confirm:no")]
+        ]
+    )
 
 
 def tie_resolve_kb(

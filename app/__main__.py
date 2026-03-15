@@ -8,11 +8,11 @@ from aiogram import Bot, Dispatcher
 from app.config import settings
 from app.db import init_db
 from app.handlers import routers
+from app.logging_config import configure_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+LOG_LEVEL = "INFO"
+
+configure_logging(LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from aiogram import Router
 from aiogram.types import Message
 
@@ -9,11 +11,13 @@ from app.bug_reports import BugReportService
 from app.config import settings
 from app.combinations import get_combinations
 from app.db import async_session
-from app.handlers.helpers import finish_tournament, show_table, _esc
-from app.keyboards import cancel_kb, combinations_kb, menu_kb, table_grid_kb
+from app.handlers.helpers import _esc, show_table
+from app.keyboards import cancel_kb, combinations_kb, menu_kb
+from app.metrics import record_status, record_tournament_created
 from app.tournament import TournamentService
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 PLAYERS_INPUT_PROMPT = (
     "📝 Введите список игроков через запятую.\n"
@@ -28,6 +32,16 @@ PLAYERS_INPUT_PROMPT = (
     "Таблица 1, строка 2: F\n"
     "и т.д."
 )
+
+
+def _sender_alias(msg: Message) -> str:
+    user = msg.from_user
+    if not user:
+        return "unknown"
+    if user.username:
+        return f"@{user.username}"
+    full_name = " ".join([p for p in [user.first_name, user.last_name] if p])
+    return full_name or f"id:{user.id}"
 
 
 @router.message()
@@ -53,8 +67,6 @@ async def handle_text(message: Message) -> None:
             await _handle_players(message, t, svc)
         elif status == "playing" and data.get("awaiting_score"):
             await _handle_score(message, t, svc)
-        elif status == "playing" and data.get("awaiting_finish_confirm"):
-            await _handle_finish_confirm(message, t, svc)
         elif status == "bug_reporting":
             await _handle_bug_report(message, t, svc, session)
 
@@ -69,8 +81,18 @@ async def _handle_naming(msg: Message, t, svc: TournamentService) -> None:
     data = t.data
     data["name"] = name
     data["status"] = "entering_players"
+    record_status("entering_players")
     t.data = data
     await svc.save(t)
+
+    logger.info(
+        "Задано название турнира",
+        extra={
+            "chat_id": msg.chat.id,
+            "tournament_name": name,
+            "alias": _sender_alias(msg),
+        },
+    )
 
     _delete_user_msg(msg)
 
@@ -90,10 +112,15 @@ async def _handle_players(msg: Message, t, svc: TournamentService) -> None:
     data = t.data
     name = data["name"]
 
-    _delete_user_msg(msg)
+    creator_alias = _sender_alias(msg)
+    data["creator_alias"] = creator_alias
 
     # Валидация количества
     if len(players) < 4:
+        logger.warning(
+            "Слишком мало игроков",
+            extra={"chat_id": msg.chat.id, "players_count": len(players), "alias": creator_alias},
+        )
         await msg.bot.edit_message_text(
             f"🏓 <b>Турнир: {_esc(name)}</b>\n\n"
             f"⚠️ Минимум 4 игрока!\n{PLAYERS_INPUT_PROMPT}",
@@ -105,6 +132,10 @@ async def _handle_players(msg: Message, t, svc: TournamentService) -> None:
         return
 
     if len(players) > 12:
+        logger.warning(
+            "Слишком много игроков",
+            extra={"chat_id": msg.chat.id, "players_count": len(players), "alias": creator_alias},
+        )
         await msg.bot.edit_message_text(
             f"🏓 <b>Турнир: {_esc(name)}</b>\n\n"
             f"⚠️ Максимум 12 игроков!\n{PLAYERS_INPUT_PROMPT}",
@@ -125,17 +156,41 @@ async def _handle_players(msg: Message, t, svc: TournamentService) -> None:
         data["tables"] = tables
         data["current_table"] = 0
         data["status"] = "playing"
+        record_status("playing")
+        record_tournament_created(creator_alias)
         data["awaiting_score"] = None
-        data["awaiting_finish_confirm"] = False
         t.data = data
         await svc.save(t)
+
+        logger.info(
+            "Турнир создан",
+            extra={
+                "chat_id": msg.chat.id,
+                "tournament_name": name,
+                "players_count": len(players),
+                "tables_count": len(tables),
+                "alias": creator_alias,
+            },
+        )
 
         await show_table(msg.bot, msg.chat.id, t.message_id, data, 0)
     else:
         # Есть выбор — показать варианты
         data["status"] = "choosing_combination"
+        record_status("choosing_combination")
         t.data = data
         await svc.save(t)
+
+        logger.info(
+            "Ожидание выбора формата таблиц",
+            extra={
+                "chat_id": msg.chat.id,
+                "tournament_name": name,
+                "players_count": len(players),
+                "options_count": len(options),
+                "alias": creator_alias,
+            },
+        )
 
         players_preview = ", ".join(players)
         await msg.bot.edit_message_text(
@@ -168,6 +223,15 @@ async def _handle_score(msg: Message, t, svc: TournamentService) -> None:
     # Валидация формата
     error = _validate_score(text)
     if error:
+        logger.warning(
+            "Некорректный формат счёта",
+            extra={
+                "chat_id": msg.chat.id,
+                "input": text,
+                "error": error,
+                "alias": _sender_alias(msg),
+            },
+        )
         table = data["tables"][score_info["table_idx"]]
         p1 = table["players"][score_info["row"] - 1]
         p2 = table["players"][score_info["col"] - 1]
@@ -199,31 +263,20 @@ async def _handle_score(msg: Message, t, svc: TournamentService) -> None:
     t.data = data
     await svc.save(t)
 
+    logger.info(
+        "Счёт матча сохранён",
+        extra={
+            "chat_id": msg.chat.id,
+            "table_idx": ti,
+            "match": key,
+            "score": f"{s1}:{s2}",
+            "alias": _sender_alias(msg),
+        },
+    )
+
     # Обновляем основное сообщение
     current = data.get("current_table", 0)
     await show_table(msg.bot, msg.chat.id, t.message_id, data, current)
-
-
-# ── Подтверждение завершения ───────────────────────────────────────────
-
-async def _handle_finish_confirm(msg: Message, t, svc: TournamentService) -> None:
-    text = msg.text.strip().lower()
-    _delete_user_msg(msg)
-
-    data = t.data
-
-    if text in ("да", "yes", "д", "y"):
-        data["awaiting_finish_confirm"] = False
-        t.data = data
-        await svc.save(t)
-        await finish_tournament(msg.bot, msg.chat.id, t, svc)
-
-    elif text in ("нет", "no", "н", "n"):
-        data["awaiting_finish_confirm"] = False
-        t.data = data
-        await svc.save(t)
-        current = data.get("current_table", 0)
-        await show_table(msg.bot, msg.chat.id, t.message_id, data, current)
 
 
 # ── Баг-репорт ─────────────────────────────────────────────────────────
@@ -254,7 +307,18 @@ async def _handle_bug_report(msg: Message, t, svc: TournamentService, session) -
 
     # Возвращаемся в меню
     t.data = {"status": "menu"}
+    record_status("menu")
     await svc.save(t)
+
+    logger.info(
+        "Баг-репорт сохранен",
+        extra={
+            "chat_id": msg.chat.id,
+            "reporter_user_id": reporter_user_id,
+            "reporter_alias": reporter_alias,
+            "text_length": len(text),
+        },
+    )
 
     is_admin = reporter_user_id == settings.ADMIN_USER_ID
     open_bug_count = None

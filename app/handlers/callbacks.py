@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
@@ -14,12 +16,19 @@ from app.handlers.helpers import (
     finish_tournament,
     show_table,
 )
-from app.keyboards import cancel_kb, combinations_kb, menu_kb, table_grid_kb, tie_resolve_kb
+from app.keyboards import (
+    cancel_kb,
+    finish_confirm_kb,
+    menu_kb,
+    tie_resolve_kb,
+)
 from app.combinations import get_combinations
+from app.metrics import record_status, record_tournament_created
 from app.ranking import calculate_table_rankings, find_unresolved_ties
 from app.tournament import TournamentService
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 # ── Заглушка для неактивных кнопок ──────────────────────────────────────
@@ -40,12 +49,17 @@ async def start_tournament(cb: CallbackQuery) -> None:
             await cb.answer("Используйте /start")
             return
         t.data = {"status": "naming"}
+        record_status("naming")
         await svc.save(t)
 
     await cb.message.edit_text(
         "✏️ <b>Введите название турнира:</b>",
         reply_markup=cancel_kb(),
         parse_mode="HTML",
+    )
+    logger.info(
+        "Запуск создания турнира",
+        extra={"chat_id": cb.message.chat.id, "alias": _callback_alias(cb)},
     )
     await cb.answer()
 
@@ -60,6 +74,7 @@ async def cancel(cb: CallbackQuery) -> None:
         if not t:
             return
         t.data = {"status": "menu"}
+        record_status("menu")
         await svc.save(t)
 
         is_admin = cb.from_user is not None and cb.from_user.id == settings.ADMIN_USER_ID
@@ -72,6 +87,10 @@ async def cancel(cb: CallbackQuery) -> None:
         "Нажмите кнопку, чтобы начать новый турнир.",
         reply_markup=menu_kb(is_admin=is_admin, open_bug_count=open_bug_count),
         parse_mode="HTML",
+    )
+    logger.info(
+        "Возврат в меню",
+        extra={"chat_id": cb.message.chat.id, "alias": _callback_alias(cb)},
     )
     await cb.answer()
 
@@ -89,6 +108,7 @@ async def bug_new(cb: CallbackQuery) -> None:
             return
         data = t.data or {}
         data["status"] = "bug_reporting"
+        record_status("bug_reporting")
         t.data = data
         await svc.save(t)
 
@@ -107,6 +127,16 @@ async def bug_new(cb: CallbackQuery) -> None:
 
 def _is_admin(user_id: int | None) -> bool:
     return user_id == settings.ADMIN_USER_ID
+
+
+def _callback_alias(cb: CallbackQuery) -> str:
+    user = cb.from_user
+    if not user:
+        return "unknown"
+    if user.username:
+        return f"@{user.username}"
+    full_name = " ".join([p for p in [user.first_name, user.last_name] if p])
+    return full_name or f"id:{user.id}"
 
 
 @router.callback_query(F.data == "bugs:list")
@@ -216,12 +246,22 @@ async def choose_combination(cb: CallbackQuery) -> None:
         data["tables"] = tables
         data["current_table"] = 0
         data["status"] = "playing"
+        record_status("playing")
+        record_tournament_created(data.get("creator_alias"))
         data["awaiting_score"] = None
-        data["awaiting_finish_confirm"] = False
 
         t.data = data
         await svc.save(t)
 
+    logger.info(
+        "Выбран формат таблиц, турнир создан",
+        extra={
+            "chat_id": cb.message.chat.id,
+            "players_count": len(players),
+            "tables_count": len(tables),
+            "alias": data.get("creator_alias") or _callback_alias(cb),
+        },
+    )
     await show_table(cb.bot, cb.message.chat.id, t.message_id, data, 0)
     await cb.answer()
 
@@ -286,6 +326,15 @@ async def match_click(cb: CallbackQuery) -> None:
 
             current = data.get("current_table", 0)
             await show_table(cb.bot, cb.message.chat.id, t.message_id, data, current)
+            logger.info(
+                "Матч переведен в статус playing",
+                extra={
+                    "chat_id": cb.message.chat.id,
+                    "table_idx": table_idx,
+                    "match": key,
+                    "alias": _callback_alias(cb),
+                },
+            )
             await cb.answer("Матч начат!")
 
         elif match["status"] == "playing":
@@ -316,6 +365,15 @@ async def match_click(cb: CallbackQuery) -> None:
             }
             t.data = data
             await svc.save(t)
+            logger.info(
+                "Запрошен ввод счёта",
+                extra={
+                    "chat_id": cb.message.chat.id,
+                    "table_idx": table_idx,
+                    "match": key,
+                    "alias": _callback_alias(cb),
+                },
+            )
             await cb.answer()
 
         elif match["status"] == "finished":
@@ -337,21 +395,74 @@ async def finish(cb: CallbackQuery) -> None:
 
         if TournamentService.all_finished(data["tables"]):
             # Все матчи сыграны — финишируем
-            await finish_tournament(cb.bot, cb.message.chat.id, t, svc)
-            await cb.answer()
-        else:
-            # Не все — просим подтверждение через текстовое сообщение
-            data["awaiting_finish_confirm"] = True
-            t.data = data
-            await svc.save(t)
-
-            await cb.message.edit_text(
-                "⚠️ <b>Не все матчи сыграны!</b>\n\n"
-                "Вы уверены, что хотите завершить турнир?\n"
-                "Напишите <b>Да</b> или <b>Нет</b>",
-                parse_mode="HTML",
+            await finish_tournament(
+                cb.bot,
+                cb.message.chat.id,
+                t,
+                svc,
+                forced=False,
             )
             await cb.answer()
+        else:
+            # Не все — просим подтверждение через инлайн-кнопки
+            await cb.message.edit_text(
+                "⚠️ <b>Не все матчи сыграны!</b>\n\n"
+                "Вы уверены, что хотите завершить турнир?",
+                reply_markup=finish_confirm_kb(),
+                parse_mode="HTML",
+            )
+            logger.warning(
+                "Запрошено принудительное завершение турнира",
+                extra={
+                    "chat_id": cb.message.chat.id,
+                    "alias": _callback_alias(cb),
+                },
+            )
+            await cb.answer()
+
+
+@router.callback_query(F.data == "finish:confirm:yes")
+async def finish_confirm_yes(cb: CallbackQuery) -> None:
+    async with async_session() as session:
+        svc = TournamentService(session)
+        t = await svc.get(cb.message.chat.id)
+        if not t or t.data.get("status") != "playing":
+            await cb.answer("Ошибка")
+            return
+
+        await finish_tournament(
+            cb.bot,
+            cb.message.chat.id,
+            t,
+            svc,
+            forced=True,
+        )
+
+    logger.warning(
+        "Турнир завершен принудительно",
+        extra={"chat_id": cb.message.chat.id, "alias": _callback_alias(cb)},
+    )
+    await cb.answer("Турнир завершён")
+
+
+@router.callback_query(F.data == "finish:confirm:no")
+async def finish_confirm_no(cb: CallbackQuery) -> None:
+    async with async_session() as session:
+        svc = TournamentService(session)
+        t = await svc.get(cb.message.chat.id)
+        if not t or t.data.get("status") != "playing":
+            await cb.answer("Ошибка")
+            return
+
+        data = t.data
+        current = data.get("current_table", 0)
+
+    await show_table(cb.bot, cb.message.chat.id, t.message_id, data, current)
+    logger.info(
+        "Принудительное завершение отменено",
+        extra={"chat_id": cb.message.chat.id, "alias": _callback_alias(cb)},
+    )
+    await cb.answer("Продолжаем турнир")
 
 
 # ── Разрешение ничьей ──────────────────────────────────────────────────
@@ -400,9 +511,16 @@ async def resolve_tie(cb: CallbackQuery) -> None:
         else:
             # Все ничьи разрешены — финализируем
             data["status"] = "playing"
+            record_status("playing")
             t.data = data
             await svc.save(t)
-            await finish_tournament(cb.bot, cb.message.chat.id, t, svc)
+            await finish_tournament(
+                cb.bot,
+                cb.message.chat.id,
+                t,
+                svc,
+                forced=False,
+            )
 
     await cb.answer()
 

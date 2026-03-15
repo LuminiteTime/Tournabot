@@ -1,17 +1,61 @@
 # CI/CD — сборка и деплой на self-hosted сервер
 name: Deploy TournaBot
 
+permissions:
+  contents: write
+
 on:
   push:
     branches: [main]
+    tags:
+      - "release-*"
 
 jobs:
-  deploy:
-    runs-on: self-hosted
-    if: "!startsWith(github.event.head_commit.message, 'docs:')"
+  create_release_tag:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create and push release tag from commit message
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${COMMIT_MESSAGE:-}" =~ ^(release-[0-9]+\.[0-9]+\.[0-9]+):[[:space:]].+ ]]; then
+            echo "Not a release commit, skipping tag creation."
+            exit 0
+          fi
+
+          release_tag="${BASH_REMATCH[1]}"
+          git fetch --tags --force
+
+          if git show-ref --tags --verify --quiet "refs/tags/${release_tag}"; then
+            existing_sha="$(git rev-list -n 1 "${release_tag}")"
+            if [[ "${existing_sha}" != "${GITHUB_SHA}" ]]; then
+              echo "Tag ${release_tag} already exists and points to ${existing_sha}, expected ${GITHUB_SHA}."
+              exit 1
+            fi
+            echo "Tag ${release_tag} already exists on current commit."
+            exit 0
+          fi
+
+          git tag "${release_tag}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${release_tag}"
+          echo "Created and pushed tag ${release_tag}."
+
+  deploy:
+    runs-on: self-hosted
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'release-')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Create .env
         run: |

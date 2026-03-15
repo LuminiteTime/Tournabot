@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+
 from aiogram import Bot
 from aiogram.types import BufferedInputFile
 
 from app.excel_export import create_results_excel
 from app.json_export import create_results_json
 from app.keyboards import table_grid_kb, tie_resolve_kb
+from app.metrics import record_status, record_tournament_finished
 from app.models import Tournament
 from app.ranking import (
     calculate_overall_rankings,
@@ -15,6 +18,8 @@ from app.ranking import (
     find_unresolved_ties,
 )
 from app.tournament import TournamentService
+
+logger = logging.getLogger(__name__)
 
 
 def table_message_text(data: dict, table_idx: int) -> str:
@@ -73,6 +78,8 @@ async def finish_tournament(
     chat_id: int,
     tournament: Tournament,
     svc: TournamentService,
+    *,
+    forced: bool,
 ) -> None:
     """
     Завершить турнир: рассчитать места, отправить Excel, показать итоги.
@@ -81,8 +88,19 @@ async def finish_tournament(
     кнопку разрешения ничьи.
     """
     data = tournament.data
+    creator_alias = data.get("creator_alias")
     tie_overrides = data.get("tie_overrides", {})
     all_rankings: list[list[dict]] = []
+
+    logger.info(
+        "Начата финализация турнира",
+        extra={
+            "chat_id": chat_id,
+            "tournament_name": data.get("name"),
+            "forced": forced,
+            "alias": creator_alias,
+        },
+    )
 
     for ti, table in enumerate(data["tables"]):
         rankings = calculate_table_rankings(
@@ -104,8 +122,19 @@ async def finish_tournament(
                     tk = f"{min(a['pos'], b['pos'])}_{max(a['pos'], b['pos'])}"
                     if tk not in overrides:
                         data["status"] = "resolving_ties"
+                        record_status("resolving_ties")
                         tournament.data = data
                         await svc.save(tournament)
+
+                        logger.warning(
+                            "Обнаружена неразрешенная ничья",
+                            extra={
+                                "chat_id": chat_id,
+                                "table_idx": t_idx,
+                                "player_a": a["name"],
+                                "player_b": b["name"],
+                            },
+                        )
 
                         await bot.edit_message_text(
                             f"⚖️ <b>Ничья в таблице {t_idx + 1}!</b>\n\n"
@@ -163,8 +192,22 @@ async def finish_tournament(
 
     # Обновляем главное сообщение
     data["status"] = "finished"
+    record_status("finished")
+    record_tournament_finished(creator_alias, forced=forced)
     tournament.data = data
     await svc.save(tournament)
+
+    logger.info(
+        "Турнир завершен",
+        extra={
+            "chat_id": chat_id,
+            "tournament_name": data.get("name"),
+            "tables_count": len(data.get("tables", [])),
+            "overall_count": len(overall),
+            "forced": forced,
+            "alias": creator_alias,
+        },
+    )
 
     await bot.edit_message_text(
         f"✅ <b>Турнир «{_esc(data['name'])}» завершён!</b>\n\n"
