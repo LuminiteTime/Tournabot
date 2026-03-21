@@ -5,9 +5,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.combinations import get_combinations
@@ -18,6 +19,8 @@ from app.rounds import get_match_round
 
 class TournamentService:
     """CRUD и бизнес-логика турниров."""
+
+    RETENTION_PERIOD = timedelta(days=2)
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -35,6 +38,7 @@ class TournamentService:
         return t
 
     async def get(self, chat_id: int) -> Optional[Tournament]:
+        await self.cleanup_expired()
         result = await self.session.execute(
             select(Tournament).where(Tournament.chat_id == chat_id)
         )
@@ -50,6 +54,14 @@ class TournamentService:
 
     async def delete(self, tournament: Tournament) -> None:
         await self.session.delete(tournament)
+        await self.session.commit()
+
+    async def cleanup_expired(self) -> None:
+        """Удалить турниры старше retention-периода."""
+        threshold = datetime.now(timezone.utc) - self.RETENTION_PERIOD
+        await self.session.execute(
+            delete(Tournament).where(Tournament.created_at < threshold)
+        )
         await self.session.commit()
 
     # ── Операции над состоянием ────────────────────────────────────────
@@ -71,9 +83,7 @@ class TournamentService:
                         "status": "pending",
                         "round": rnd,
                     }
-            tables.append(
-                {"size": size, "players": table_players, "matches": matches}
-            )
+            tables.append({"size": size, "players": table_players, "matches": matches})
         return tables
 
     @staticmethod

@@ -48,7 +48,58 @@ jobs:
           git push origin "refs/tags/${release_tag}"
           echo "Created and pushed tag ${release_tag}."
 
+  prepare_runner:
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'release-')
+    steps:
+      - name: Setup SSH access
+        env:
+          RUNNER_SSH_PRIVATE_KEY: ${{ secrets.RUNNER_SSH_PRIVATE_KEY }}
+          RUNNER_SSH_HOST: ${{ secrets.RUNNER_SSH_HOST }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${RUNNER_SSH_PRIVATE_KEY}" > ~/.ssh/runner_key
+          chmod 600 ~/.ssh/runner_key
+          ssh-keyscan -H "${RUNNER_SSH_HOST}" >> ~/.ssh/known_hosts
+
+      - name: Start self-hosted runner if needed
+        env:
+          RUNNER_SSH_HOST: ${{ secrets.RUNNER_SSH_HOST }}
+          RUNNER_SSH_USER: ${{ secrets.RUNNER_SSH_USER }}
+          RUNNER_REMOTE_DIR: ${{ secrets.RUNNER_REMOTE_DIR }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/runner_key "${RUNNER_SSH_USER}@${RUNNER_SSH_HOST}" <<EOF
+          set -euo pipefail
+          RUNNER_DIR="${RUNNER_REMOTE_DIR}"
+          PID_FILE="\${RUNNER_DIR}/.ci-managed-runner.pid"
+          STATE_FILE="\${RUNNER_DIR}/.ci-managed-runner.state"
+          LOG_FILE="\${RUNNER_DIR}/.ci-managed-runner.log"
+
+          if pgrep -af "\${RUNNER_DIR}/bin/Runner.Listener" >/dev/null 2>&1; then
+            echo "Runner already running, leaving it untouched."
+            rm -f "\${PID_FILE}" "\${STATE_FILE}"
+            exit 0
+          fi
+
+          cd "\${RUNNER_DIR}"
+          nohup ./run.sh > "\${LOG_FILE}" 2>&1 &
+          echo \$! > "\${PID_FILE}"
+          echo "started_by_ci" > "\${STATE_FILE}"
+
+          sleep 5
+          if ! kill -0 "\$(cat "\${PID_FILE}")" 2>/dev/null; then
+            echo "Runner failed to start."
+            cat "\${LOG_FILE}" || true
+            exit 1
+          fi
+
+          echo "Runner started by CI."
+          EOF
+
   deploy:
+    needs: prepare_runner
     runs-on: self-hosted
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'release-')
     steps:
@@ -74,3 +125,57 @@ jobs:
 
       - name: Cleanup
         run: docker image prune -f
+
+  stop_runner:
+    runs-on: ubuntu-latest
+    needs: [prepare_runner, deploy]
+    if: always() && github.ref_type == 'tag' && startsWith(github.ref_name, 'release-')
+    steps:
+      - name: Setup SSH access
+        env:
+          RUNNER_SSH_PRIVATE_KEY: ${{ secrets.RUNNER_SSH_PRIVATE_KEY }}
+          RUNNER_SSH_HOST: ${{ secrets.RUNNER_SSH_HOST }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${RUNNER_SSH_PRIVATE_KEY}" > ~/.ssh/runner_key
+          chmod 600 ~/.ssh/runner_key
+          ssh-keyscan -H "${RUNNER_SSH_HOST}" >> ~/.ssh/known_hosts
+
+      - name: Stop CI-started self-hosted runner
+        env:
+          RUNNER_SSH_HOST: ${{ secrets.RUNNER_SSH_HOST }}
+          RUNNER_SSH_USER: ${{ secrets.RUNNER_SSH_USER }}
+          RUNNER_REMOTE_DIR: ${{ secrets.RUNNER_REMOTE_DIR }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/runner_key "${RUNNER_SSH_USER}@${RUNNER_SSH_HOST}" <<EOF
+          set -euo pipefail
+          RUNNER_DIR="${RUNNER_REMOTE_DIR}"
+          PID_FILE="\${RUNNER_DIR}/.ci-managed-runner.pid"
+          STATE_FILE="\${RUNNER_DIR}/.ci-managed-runner.state"
+
+          if [[ ! -f "\${STATE_FILE}" ]]; then
+            echo "Runner was not started by CI, skipping stop."
+            exit 0
+          fi
+
+          if [[ -f "\${PID_FILE}" ]]; then
+            pid="\$(cat "\${PID_FILE}")"
+            if kill -0 "\${pid}" 2>/dev/null; then
+              kill "\${pid}" || true
+              for _ in {1..30}; do
+                if ! kill -0 "\${pid}" 2>/dev/null; then
+                  break
+                fi
+                sleep 1
+              done
+              if kill -0 "\${pid}" 2>/dev/null; then
+                kill -9 "\${pid}" || true
+              fi
+            fi
+          fi
+
+          rm -f "\${PID_FILE}" "\${STATE_FILE}"
+          echo "Runner stopped."
+          EOF
