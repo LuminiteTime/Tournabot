@@ -2,6 +2,14 @@ services:
   bot:
     build: .
     restart: unless-stopped
+    mem_limit: 300m
+    cpus: "0.75"
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     env_file: .env
     depends_on:
       db:
@@ -10,6 +18,14 @@ services:
   db:
     image: postgres:16-alpine
     restart: unless-stopped
+    mem_limit: 384m
+    cpus: "0.75"
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     env_file: .env
     volumes:
       - pgdata:/var/lib/postgresql/data
